@@ -1,0 +1,3 @@
+row 0 is    1048576 bits in width.           0 cumulative hash ops
+row 1023 is  524800 bits in width.   804519936 cumulative hash ops
+row 2046 is    1024 bits in width.  1073217024 cumulative hash ops

@@ -9,34 +9,8 @@ import (
 )
 
 func main() {
-	pyramid2()
+	pebble()
 	return
-}
-
-func pyramid2() {
-	base := make([]byte, 8)
-
-	// initialize pyramid base
-	for i, _ := range base {
-		base[i] = uint8(i)
-	}
-
-	w := 8
-	for h := 0; h < 8; h++ {
-		for x := 0; x < (w-h)-1; x++ {
-			sum := blake2b.Sum256([]byte{base[x], base[x+1]})
-			base[x] = sum[0]
-			fmt.Printf("%x %x\t", x, sum[0])
-		}
-		fmt.Printf("\n")
-	}
-	z := buildBase(10)
-	fmt.Printf("%d bits\n", len(z)*8)
-	fmt.Printf("%x\n\n\n", z)
-
-	y := nextLvl(z)
-	fmt.Printf("%d bits\n", len(y)*8)
-	fmt.Printf("%x\n", y)
 }
 
 // buildBase creates the lowest base level of the pyramid.
@@ -56,42 +30,97 @@ func buildBase(logWidth uint8) []byte {
 	return buf.Bytes()
 }
 
-func nextLvl(base []byte) []byte {
-	// try with in-degree 512.
-	// reduce width by 511 bits.
-	n := uint64(len(base) * 8)
+func nextLvl(row []byte) uint64 {
+	// for iteration ascending the pyramid, read in 65 bytes.  Some of the rightmost
+	// byte will be mixed in to the leftmost byte.
 
-	var i uint64
+	// loop is per-bit.
+	// need to write in-place at bit i; otherwise you're using like 2*row memory
+	// and the whole idea is that you max out at n memory
 
-	for i < n-512 {
+	bitlength := uint64(len(row) * 8)
+
+	var i, hashes uint64
+
+	for i < bitlength-512 {
+
 		b := i / 8        // b is the byte position
-		t := uint8(i % 8) // t is the bit position
+		t := uint8(i % 8) // t is the bit position within the byte
 
-		// most bytes are loaded as-is.  The first and last bytes are rotated by t
+		// first and last bytes are special; all middle bytes are copied in as-is
+		first := row[b]
+		last := row[b+64]
+
+		// zero out t bits from first, and zero out all but t bits from last, then
+		// or the two together
+
+		first &= 0xff >> t
+
+		last &= 0xff >> (8 - t)
 
 		input := make([]byte, 64)
-		copy(input, base[b:b+62])
+		input[0] = first | last
 
-		last := base[b+63]
-
-		// shift first byte up by t
-		input[0] = input[0] << t
-
-		input[62] = last >> (8 - t)
+		copy(input[1:], row[b+1:b+63])
 
 		sum := blake2b.Sum256(input)
-
+		hashes++
 		// clear the bit position we're at
-		base[b] &= ^(1 << t)
-		// set with MSbit of hash output.
-		// actually not using the first bit of the hash output but should be OK.
-		base[b] |= sum[0] & (1 << t)
+		row[b] &= ^(1 << t)
+		// set current bit position with (any bit of) hash output.
 
-		//		fmt.Printf("%x.", base[:32])
+		row[b] |= sum[0] & (1 << t)
 		//		fmt.Printf("b:%d t:%d\n", b, t)
+		//		fmt.Printf("%x.", row[b:b+32])
 
 		i++
 	}
-
-	return base
+	row = row[:8]
+	return hashes
 }
+
+func pebble() {
+	row := buildBase(20)
+	var i, hashes uint64
+
+	for len(row) > 64 {
+
+		fmt.Printf("%x ", row[:32])
+		fmt.Printf("row %d is %d bits in width. %d cumulative hash ops\n",
+			i, len(row)*8, hashes)
+
+		hashes += nextLvl(row)
+		row = row[:len(row)-64]
+		i++
+		//		fmt.Printf("row is %d bits\n%x\n", len(row)*8, row)
+	}
+	fmt.Printf("Final output is %x\n", row)
+}
+
+/*
+func pyramid2() {
+	base := make([]byte, )
+
+	// initialize pyramid base
+	for i, _ := range base {
+		base[i] = uint8(i)
+	}
+
+	w := 8
+	for h := 0; h < 8; h++ {
+		for x := 0; x < (w-h)-1; x++ {
+			sum := blake2b.Sum256([]byte{base[x], base[x+1]})
+			base[x] = sum[0]
+			fmt.Printf("%x %x\t", x, sum[0])
+		}
+		fmt.Printf("\n")
+	}
+	z := buildBase(10)
+	fmt.Printf("%d bits\n", len(z)*8)
+	fmt.Printf("%x\n\n\n", z)
+
+	nextLvl(z)
+	fmt.Printf("%d bits\n", len(z)*8)
+	fmt.Printf("%x\n", z)
+}
+*/
