@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"sync"
 
 	"github.com/minio/blake2b-simd"
 )
@@ -38,49 +39,58 @@ func nextLvl(row []byte) uint64 {
 	// need to write in-place at bit i; otherwise you're using like 2*row memory
 	// and the whole idea is that you max out at n memory
 
-	bitlength := uint64(len(row) * 8)
+	rowlength := uint64(len(row))
+	var b, hashes uint64
 
-	var i, hashes uint64
-
-	for i < bitlength-512 {
-
-		b := i / 8        // b is the byte position
-		t := uint8(i % 8) // t is the bit position within the byte
+	// operate per-byte, with 8 concurrent hash operations
+	for b < rowlength-64 {
 
 		// first and last bytes are special; all middle bytes are copied in as-is
 		first := row[b]
 		last := row[b+64]
 
-		// zero out t bits from first, and zero out all but t bits from last, then
-		// or the two together
+		// build 8 64 byte arrays for 8-at-once hashes
+		// result bit will end up in the first bit of the array
+		var multiIn [8][64]byte
 
-		first &= 0xff >> t
+		for pos, _ := range multiIn {
+			i := uint8(pos)
+			multiIn[i][0] = (first & 0xff >> i) | (last & 0xff >> (8 - i))
+			copy(multiIn[i][1:], row[b+1:b+63])
+		}
 
-		last &= 0xff >> (8 - t)
+		bitWG := new(sync.WaitGroup)
+		bitWG.Add(8)
+		for pos, _ := range multiIn {
+			i := uint8(pos)
+			go oneNode(&multiIn[i], i, bitWG)
+		}
+		bitWG.Wait()
 
-		input := make([]byte, 64)
-		input[0] = first | last
+		hashes += 8
+		// clear the whole byte we worked on and will replace
+		row[b] = 0
 
-		copy(input[1:], row[b+1:b+63])
+		for pos, _ := range multiIn {
+			// OR in the bit set by the hash output in oneNode
+			row[b] |= multiIn[pos][0]
+		}
 
-		sum := blake2b.Sum256(input)
-		hashes++
-		// clear the bit position we're at
-		row[b] &= ^(1 << t)
-		// set current bit position with (any bit of) hash output.
-
-		row[b] |= sum[0] & (1 << t)
-		//		fmt.Printf("b:%d t:%d\n", b, t)
-		//		fmt.Printf("%x.", row[b:b+32])
-
-		i++
+		b++
 	}
 	row = row[:8]
 	return hashes
 }
 
+func oneNode(inrow *[64]byte, bitPosition uint8, wg *sync.WaitGroup) {
+	*inrow = blake2b.Sum512(inrow[:])
+	inrow[0] &= 1 << bitPosition
+	wg.Done()
+	return
+}
+
 func pebble() {
-	row := buildBase(20)
+	row := buildBase(16)
 	var i, hashes uint64
 
 	for len(row) > 64 {
