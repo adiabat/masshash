@@ -13,7 +13,7 @@ const (
 )
 
 func main() {
-	pebbleVar(18, 6)
+	pebbleVar(16, 0)
 	return
 }
 
@@ -60,16 +60,25 @@ func pebbleVar(logBase, logWidth uint8) {
 	// label size is 2**logWidth
 	hSize := uint64(1 << logWidth)
 	// can't have hSize more than 64 bytes; blake2b doesn't provide that much
+	// arbitrary input size is possible and would speed it up, but breaks
+	// memory requirement (random oracle as cache)
 	if hSize > 64 {
 		panic("hash output size greater than 64")
 	}
+	if hSize > inputSize {
+		panic("hash output size greater than input size (leaves gaps)")
+	}
+	if hSize == inputSize {
+		panic("hash output size greater equal to input size no pyramiding")
+	}
+
 	row := buildBase(logBase)
 
 	var totalHashes uint64
-	var height int
+	var height uint64
 
 	// total height of the cylinder is row / hashSize
-	levels := len(row) / inputSize
+	levels := uint64(len(row)) / (inputSize - hSize)
 
 	for height < levels {
 		totalHashes += nextLvl(row, hSize)
@@ -110,10 +119,7 @@ func nextLvl(row []byte, hSize uint64) uint64 {
 
 	pos := uint64(0)
 	for pos < rowLength {
-
 		input := row[pos : pos+inputSize]
-		//		input = append(input, 0)
-		//		input = append(input, 0)
 		nHash := blake2b.Sum512(input)
 		hashes++
 		copy(row[pos:pos+hSize], nHash[:])
