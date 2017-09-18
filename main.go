@@ -4,24 +4,27 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"sync"
 
 	"github.com/minio/blake2b-simd"
 )
 
+const (
+	inputSize = 1024
+)
+
 func main() {
-	pebble()
+	pebbleVar(16, 4)
 	return
 }
 
 // buildBase creates the lowest base level of the pyramid.
 // the lowest level is just 0, 1, 2, 3... in uint64s
-// argument log width is base 2 log of how many BITS you want.
-// eg 24 will give you 2^24 bits, 16Mbit, ~2Mbyte
+// argument log width is base 2 log of how many bytes you want.
+// eg 24 will give you 2^24 bypes, 16Mbyte
 func buildBase(logWidth uint8) []byte {
 
 	// wordWidth is how many 64-bit (8 byte) words. >>6 because 64 bits per word.
-	wordWidth := uint64(1<<logWidth) / 64
+	wordWidth := uint64(1<<logWidth) / 8
 
 	var buf bytes.Buffer
 
@@ -31,106 +34,211 @@ func buildBase(logWidth uint8) []byte {
 	return buf.Bytes()
 }
 
-func nextLvl(row []byte) uint64 {
-	// for iteration ascending the pyramid, read in 65 bytes.  Some of the rightmost
-	// byte will be mixed in to the leftmost byte.
+func pebble() {
+	row := buildBase(20)
+	var totalHashes uint64
+	var height int
+	levels := len(row) / 64
 
-	// loop is per-bit.
-	// need to write in-place at bit i; otherwise you're using like 2*row memory
-	// and the whole idea is that you max out at n memory
-
-	rowlength := uint64(len(row))
-	var b, hashes uint64
-
-	// operate per-byte, with 8 concurrent hash operations
-	for b < rowlength-64 {
-
-		// first and last bytes are special; all middle bytes are copied in as-is
-		first := row[b]
-		last := row[b+64]
-
-		// build 8 64 byte arrays for 8-at-once hashes
-		// result bit will end up in the first bit of the array
-		var multiIn [8][64]byte
-
-		for pos, _ := range multiIn {
-			i := uint8(pos)
-			multiIn[i][0] = (first & 0xff >> i) | (last & 0xff >> (8 - i))
-			copy(multiIn[i][1:], row[b+1:b+63])
-		}
-
-		bitWG := new(sync.WaitGroup)
-		bitWG.Add(8)
-		for pos, _ := range multiIn {
-			i := uint8(pos)
-			go oneNode(&multiIn[i], i, bitWG)
-		}
-		bitWG.Wait()
-
-		hashes += 8
-		// clear the whole byte we worked on and will replace
-		row[b] = 0
-
-		for pos, _ := range multiIn {
-			// OR in the bit set by the hash output in oneNode
-			row[b] |= multiIn[pos][0]
-		}
-
-		b++
+	for height < levels {
+		totalHashes += deg2NextLvl(row)
+		height++
 	}
-	row = row[:8]
+
+	fmt.Printf("Final output is %x\n", row)
+	fmt.Printf("width %d bytes, height %d\n", len(row), height)
+	fmt.Printf("%d hashes performed\n", totalHashes)
+
+}
+
+func pebbleVar(logBase, logWidth uint8) {
+
+	// label size is 2**logWidth
+	hSize := uint64(1 << logWidth)
+	if hSize > 512 {
+		panic("hash output size greater than 512")
+	}
+	row := buildBase(logBase)
+
+	var totalHashes uint64
+	var height int
+
+	// total height of the cylinder is row / hashSize
+	levels := len(row) / inputSize
+
+	for height < levels {
+		totalHashes += nextLvl(row, hSize)
+		height++
+	}
+
+	fmt.Printf("Final output is %x\n", row)
+	fmt.Printf("hash output size %d bytes. %d labels per row\n",
+		hSize, uint64(len(row))/hSize)
+	fmt.Printf("row width %d bytes. fanout %d bytes per level. height %d\n",
+		len(row), inputSize, height)
+	fmt.Printf("%d hashes performed\n", totalHashes)
+
+}
+
+// deg2NextLvl computes the next level up with a variable degree (based on hash
+// output size)
+func nextLvl(row []byte, hSize uint64) uint64 {
+	var hashes uint64
+
+	if uint64(len(row)) < hSize+inputSize {
+		fmt.Printf("length of input only %d bytes long\n", len(row))
+		return 0
+	}
+	if uint64(len(row))%hSize != 0 {
+		fmt.Printf("length of input not multiple of %d\n", hSize)
+		return 0
+	}
+
+	// rowlength is the length of the actual row before we append to it.
+	rowLength := uint64(len(row))
+
+	// modify the row by sticking the first hSize bytes on the end
+	row = append(row, row[:inputSize]...)
+
+	// then iterate through till rowlenght (there will be one hash size
+	// left at the end of the row
+
+	pos := uint64(0)
+	for pos < rowLength {
+
+		input := row[pos : pos+inputSize]
+		//		input = append(input, 0)
+		nHash := blake2b.Sum512(input)
+		hashes++
+		copy(row[pos:pos+hSize], nHash[:])
+		pos += hSize
+
+	}
 	return hashes
 }
 
-func oneNode(inrow *[64]byte, bitPosition uint8, wg *sync.WaitGroup) {
-	*inrow = blake2b.Sum512(inrow[:])
-	inrow[0] &= 1 << bitPosition
-	wg.Done()
-	return
+// deg2NextLvl computes the next level up with a degree-2 pyramiding. wraps around
+func deg2NextLvl(row []byte) uint64 {
+	var hashes uint64
+
+	hSize := uint64(64)
+	if uint64(len(row)) < 2*hSize {
+		fmt.Printf("length of input only %d bytes long\n", len(row))
+		return 0
+	}
+	if uint64(len(row))%hSize != 0 {
+		fmt.Printf("length of input not multiple of %d\n", hSize)
+		return 0
+	}
+
+	// rowlength is the length of the actual row before we append to it.
+	rowLength := uint64(len(row))
+
+	// modify the row by sticking the first hSize bytes on the end
+	row = append(row, row[:hSize]...)
+
+	// then iterate through till rowlenght (there will be one hash size
+	// left at the end of the row
+
+	pos := uint64(0)
+	for pos < rowLength {
+		// for clarity, indicate positions from where we draw data
+		rStart := pos + hSize
+		rEnd := rStart + hSize
+		//		fmt.Printf("row len %d, lstart %d rend %d\n", len(row), pos, rEnd)
+
+		input := append(row[pos:rStart], row[rStart:rEnd]...)
+		//		input = append(input, 0)
+		nHash := blake2b.Sum512(input)
+		hashes++
+		copy(row[pos:rStart], nHash[:])
+		pos += hSize
+
+	}
+	return hashes
 }
 
-func pebble() {
+func pebble512() {
 	row := buildBase(16)
-	var i, hashes uint64
 
-	for len(row) > 64 {
+	var totalHashes uint64
+	var height int
+	levels := len(row) / 512
 
-		fmt.Printf("%x ", row[:32])
-		fmt.Printf("row %d is %d bits in width. %d cumulative hash ops\n",
-			i, len(row)*8, hashes)
-
-		hashes += nextLvl(row)
-		row = row[:len(row)-64]
-		i++
-		//		fmt.Printf("row is %d bits\n%x\n", len(row)*8, row)
+	for height < levels {
+		totalHashes += deg512NextLvl(row)
+		height++
 	}
+
 	fmt.Printf("Final output is %x\n", row)
+	fmt.Printf("width %d bytes, height %d\n", len(row), height)
+	fmt.Printf("%d hashes performed\n", totalHashes)
 }
 
-/*
-func pyramid2() {
-	base := make([]byte, )
+// deg512NextLvl computes the next level of the pyramid / cylinder
+// use indegree of 512 by outputting only a single bit per hash evaluation
+func deg512NextLvl(row []byte) uint64 {
+	// for iteration ascending the pyramid, read in 65 bytes.  We only need 512
+	// bits, but it won't be byte-alligned so we need data from the byte directly
+	// below us, plus the 64 to the left of us.
 
-	// initialize pyramid base
-	for i, _ := range base {
-		base[i] = uint8(i)
+	// First, copy the left-most 65 bytes and append it to the right.
+	// This allows an easy way to loop around withough having to detect / deal
+	// with the edge pebbles.  We can fan out to down and right.
+
+	// This append step does take extra memory equivalent to the degree.
+	// This could be eliminated with a left-facing fan-out to save memory, but
+	// since our in-degree is so small relative to the row size, (which is
+	// a point in the paper) it's not worth the extra code to do so.
+
+	// loop is per-byte
+
+	// rowlength is the length of the actual row before we append to it.
+	rowlength := uint64(len(row))
+
+	// modify the row by sticking looping the first 65 bytes on the end
+
+	row = append(row, row[:65]...)
+
+	var cur, hashes uint64
+
+	// iterate per-byte
+	for cur < rowlength {
+		row[cur] = oneByte(row[cur : cur+65])
+		hashes += 8
+		cur++
 	}
 
-	w := 8
-	for h := 0; h < 8; h++ {
-		for x := 0; x < (w-h)-1; x++ {
-			sum := blake2b.Sum256([]byte{base[x], base[x+1]})
-			base[x] = sum[0]
-			fmt.Printf("%x %x\t", x, sum[0])
-		}
-		fmt.Printf("\n")
-	}
-	z := buildBase(10)
-	fmt.Printf("%d bits\n", len(z)*8)
-	fmt.Printf("%x\n\n\n", z)
-
-	nextLvl(z)
-	fmt.Printf("%d bits\n", len(z)*8)
-	fmt.Printf("%x\n", z)
+	return hashes
 }
-*/
+
+// oneByte calculates the byte above the 65 bytes given.  This needs 8 calls to
+// the hash function: one per bit.
+func oneByte(inRow []byte) uint8 {
+	// make sure we have 65 bytes
+	if len(inRow) != 65 {
+		fmt.Printf("invalid length %d for oneUp\n", len(inRow))
+		panic("invalid length")
+	}
+	var resultByte uint8
+	// make 8 calls to oneBit
+	for i := 0; i < 8; i++ {
+		resultByte |= oneBit(inRow, uint8(i))
+	}
+	return resultByte
+}
+
+// oneBit calculates a single bit with in-degree 512
+func oneBit(inRow []byte, position uint8) uint8 {
+	// just assume inRow is 65 bytes.  If it's not this will crash
+	var hashInput [64]byte
+	copy(hashInput[:], inRow[:64])
+	// shift the leftmost bits left by the position number, eliminating them
+	hashInput[0] <<= position
+	// move in the rightmost bits to take the place of the eliminated leftmost bits
+	hashInput[0] |= inRow[64] >> (8 - position)
+	// calculate the hash (random oracle call)
+	hashOutput := blake2b.Sum512(hashInput[:])
+	// return one bit from the leftmost byte
+	return hashOutput[0] & (1 << position)
+}
