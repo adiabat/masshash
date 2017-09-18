@@ -9,11 +9,11 @@ import (
 )
 
 const (
-	inputSize = 1024
+	inputSize = 128
 )
 
 func main() {
-	pebbleVar(16, 4)
+	pebbleVar(18, 6)
 	return
 }
 
@@ -51,12 +51,17 @@ func pebble() {
 
 }
 
+// pebbleVar runs the pebbling with variable base size and hash output size.
+// both arguments are log numbers of bytes, so (12, 4) will make a base
+// 4096 bytes long, and use a hash output size of 16 bytes.  Maximum hash
+// output size is 512 bytes. Hash input size is fixed at 1024 bytes.
 func pebbleVar(logBase, logWidth uint8) {
 
 	// label size is 2**logWidth
 	hSize := uint64(1 << logWidth)
-	if hSize > 512 {
-		panic("hash output size greater than 512")
+	// can't have hSize more than 64 bytes; blake2b doesn't provide that much
+	if hSize > 64 {
+		panic("hash output size greater than 64")
 	}
 	row := buildBase(logBase)
 
@@ -74,7 +79,7 @@ func pebbleVar(logBase, logWidth uint8) {
 	fmt.Printf("Final output is %x\n", row)
 	fmt.Printf("hash output size %d bytes. %d labels per row\n",
 		hSize, uint64(len(row))/hSize)
-	fmt.Printf("row width %d bytes. fanout %d bytes per level. height %d\n",
+	fmt.Printf("row width %d bytes. fan-in %d bytes per level. height %d\n",
 		len(row), inputSize, height)
 	fmt.Printf("%d hashes performed\n", totalHashes)
 
@@ -107,6 +112,7 @@ func nextLvl(row []byte, hSize uint64) uint64 {
 	for pos < rowLength {
 
 		input := row[pos : pos+inputSize]
+		//		input = append(input, 0)
 		//		input = append(input, 0)
 		nHash := blake2b.Sum512(input)
 		hashes++
