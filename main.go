@@ -34,23 +34,6 @@ func buildBase(logWidth uint8) []byte {
 	return buf.Bytes()
 }
 
-func pebble() {
-	row := buildBase(20)
-	var totalHashes uint64
-	var height int
-	levels := len(row) / 64
-
-	for height < levels {
-		totalHashes += deg2NextLvl(row)
-		height++
-	}
-
-	fmt.Printf("Final output is %x\n", row)
-	fmt.Printf("width %d bytes, height %d\n", len(row), height)
-	fmt.Printf("%d hashes performed\n", totalHashes)
-
-}
-
 // pebbleVar runs the pebbling with variable base size and hash output size.
 // both arguments are log numbers of bytes, so (12, 4) will make a base
 // 4096 bytes long, and use a hash output size of 16 bytes.  Maximum hash
